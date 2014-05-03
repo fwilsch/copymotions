@@ -1,0 +1,23 @@
+#sample config-file for copymotions
+*** connection ***
+
+type = rsync
+host = 
+user =
+dir =
+start-year = 2014
+start-month= 1
+
+
+*** target ***
+
+tmp-dir=
+target-dir =
+default-dir = false
+reader-dir = false
+
++ abbreviations
+
+TO	Formalia
+S	Antraege/Satzung
+V	Antraege/Verschiedenes

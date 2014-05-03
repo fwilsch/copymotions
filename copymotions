@@ -1,0 +1,228 @@
+#!/usr/bin/perl
+
+#   copymotions - A Perl script to copy, rename and sort files generated
+#   by the cvtx-plugin written by Alexander Fecke and Max Löffler
+#
+#   Copyright (C) 2014  Florian Wilsch
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; either version 2 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License along
+#   with this program; if not, write to the Free Software Foundation, Inc.,
+#   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+use strict;
+use Config::Grammar;
+use Data::Dumper;
+
+#set parser
+my $RE_TYPE='(local)|(rsync)';
+my $RE_YEAR='?[1-9]|(false)';
+my $RE_MONTH='?[1-9]|(false)';
+
+my $parser=Config::Grammar->new(
+{
+	_sections =>['connection', 'target', 'settings'],
+	connection=> {
+		_vars =>['type', 'host', 'user', 'dir', 'start-year', 'start-month'],
+		type => {
+			_doc => "connection type - rsync or local",
+			_re => $RE_TYPE,
+			_re_error => 'invalid connection type'
+		},
+		host => {
+			_doc => "host name"
+		},
+		user => {
+			_doc => "user name"
+		},
+		dir => {
+			_doc => "wordpress \"uploads\"-directory"
+		},
+		'start-year' => {
+			_doc => "first year to download, download everything if left empty",
+			_re => $RE_YEAR,
+			_re_error => "invalid year - enter a year or set to \"false\""
+			},
+		'start-month' => {
+			_doc => "first month to download, defaults to January",
+			_re => $RE_MONTH,
+			_re_error => "invalid month - enter a month or set to \"false\""
+		}
+	},
+	target => {
+		_vars => ['tmp-dir', 'target-dir', 'default-dir', 'reader-dir'],
+		_sections => ['abbreviations'],
+		'target-dir' => {
+			_doc => "directory to place the resolutions in"
+		},
+		'tmp-dir' => {
+			_doc => "directory to temporarily place files in - if no connection is specified, this directory has to be populated"
+		},
+		'default-dir' => {
+			_doc => "default directory for unmatched files, leave empty to ignore such files"
+		},
+		'reader-dir' => {
+			_doc => "directory to place reader documents in"
+		},
+		abbreviations => {
+			_doc => "table of abbreviations and corresponding subdirectories",
+			_table => {
+				_key => 0,
+				_columns => 2,
+				0 => {
+					_doc => "abbreviation",
+					_example => "S"
+				},
+				1 => {
+					_doc => "subfolder",
+					_example => "Antraege/Satzung"
+				}
+			}
+		}
+	},
+}
+);
+
+#read config-file
+my $config=$parser->parse('config') or
+	die "ERROR: $parser->{err}\n";
+
+my %abbr = %{${${$config}{'target'}}{'abbreviations'}};
+my $orig_dir =  ${$config}{'target'}{'tmp-dir'};
+my $target_dir = ${$config}{'target'}{'target-dir'};
+my $default_dir = ${$config}{'target'}{'default-dir'};
+my $reader_dir = ${$config}{'target'}{'reader-dir'};
+my $remote_dir = ${$config}{'connection'}{'dir'};
+my $year = ${$config}{'connection'}{'start-year'};
+my $month = ${$config}{'connection'}{'start-month'};
+if ($month eq "false") {$month=1;}
+my @t=localtime;
+
+
+
+#copy using rsync
+if(${$config}{'connection'}{'type'}eq 'rsync') {
+	if ($year eq "false") {
+		getfiles("/*/*/*.pdf");
+}
+	else{
+		while($year <= $t[5]+1900) {
+			while($month <= $t[4]+1 || ($month <= 12 && $year < $t[5]+1900)) {
+				getfiles("/$year"."/".($month<10?"0$month":"$month")."/*.pdf");
+				$month++;
+			}
+			$year++;
+			$month=1;
+		}
+	}
+}
+
+
+
+
+
+#check whether all directories exist, create nonexistent ones
+
+foreach my $key (keys %abbr) {
+	checkdir($abbr{$key}[1], $target_dir);
+}
+
+if($default_dir ne "false") {checkdir($default_dir, $target_dir);}
+if($reader_dir ne "false") {checkdir($default_dir, $reader_dir);}
+
+
+#create new filename
+my $newname;
+my $respadding=2;
+my $linepadding=3;
+opendir (DIR, $orig_dir) or die $!;
+
+while (my $file=readdir(DIR)) {
+	if($file=~/^(?![a-zA-Z])/) {next;} #resolutions and applications begin with a letter, other files do not
+	my @tmp_name=split /[-_.]/ , $file;
+
+	if(pop(@tmp_name) ne 'pdf') {next;} #we only care about pdf-files and add the extension later manually
+
+	if(int($tmp_name[1])==0) {
+		if($default_dir ne "false") {
+			system("cp -uT $orig_dir".'/'."$file $target_dir".'/'."$default_dir"."/"."$newname");
+		}
+	}
+	$newname = renamefile(\@tmp_name, $respadding, $linepadding);
+	#copy the file to the target folder, using its new name
+	if(exists $abbr{uc($tmp_name[0])}) {
+		system("cp -uT $orig_dir".'/'."$file $target_dir".'/'."$abbr{uc($tmp_name[0])}[1]".'/'."$newname" );
+	} else {
+		if($default_dir ne "false") {
+			system("cp -uT $orig_dir".'/'."$file $target_dir".'/'."$default_dir"."/"."$newname");
+		}
+	}
+}
+
+closedir(DIR);
+
+
+#checkdir ($subdir, $topdir)
+#checks whether $topdir / $subdir exists and creates it, if not
+sub checkdir
+{
+	my $conc_dir=$_[1];
+	my $this_dir = $_[0];
+	my @dirs = split /\// , $this_dir;
+	for(my $i=0; $i<scalar(@dirs); $i++) {
+		$conc_dir.="/".$dirs[$i];
+		if (-d $conc_dir) {
+		}
+		else {
+			if (-e $conc_dir) { #check whether a colliding file exists
+				die "ERROR: file $conc_dir exists!";
+			}
+			system("mkdir $conc_dir");	
+		}
+	}
+}
+
+# renamefile(\@filename, $respadding, $linepadding)
+# returns a new filename with correct padding
+sub renamefile
+{
+	my $name;
+	${$_[0]}[1]= ('0' x ($_[1] - length(int(${$_[0]}[1])))) . ${$_[0]}[1];
+	my $isint=${$_[0]}[2];
+	my $i=0;
+	if($isint =~ m/^\d+$/) { #then this file is an amendment
+		${$_[0]}[2]= ('0' x ($_[2] - length(int(${$_[0]}[2])))) . ${$_[0]}[2];
+		$name=${$_[0]}[0].'-'.${$_[0]}[1].'_'.${$_[0]}[2];
+		for($i=3; $i<scalar(@{$_[0]}); $i++) {$name.='-'.${$_[0]}[$i];}
+		$name.='.pdf';
+	}
+	else { #if not, it is a resolution or application
+		$name=${$_[0]}[0];
+		for ($i=1; $i<scalar(@{$_[0]}); $i++)
+			{$name.='-'.${$_[0]}[$i];}
+		$name.='.pdf';
+	}
+	return $name;
+}
+
+# getfiles($remote_subdir)
+# downloads pdf-files from $remote_dir/$remote_subdir to $orig_dir
+sub getfiles
+{
+	my $exit_status=-1;
+	my $tries=5;
+	while (($exit_status==-1||$exit_status==12||$exit_status==30||$exit_status==35||$exit_status==255)&&$tries>0) {
+		$exit_status=system("rsync ${$config}{'connection'}{'user'}"."@"."${$config}{'connection'}{'host'}".":"."$remote_dir"."$_[0] $orig_dir");
+		$tries--;
+	}
+}
+
